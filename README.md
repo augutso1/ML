@@ -1,3 +1,3 @@
 ### Just learning ML
 
-<img src="video-projeto.gif" alt="Video do Projeto">
+![Demonstração da aplicação](python/video-projeto.gif)
