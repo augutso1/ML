@@ -2,14 +2,16 @@ import pandas as pd
 import numpy as np
 import torch
 import torch.nn as nn
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
 
 # Função para carregar e preparar os dados do dataset
 # - Carrega o arquivo CSV especificado
 # - Seleciona apenas as colunas relevantes (preço, área, quartos, andares)
 def carregar_dataset(caminho):
     df = pd.read_csv(caminho)  # Carrega o dataset do arquivo CSV
-    df = df[['price','area', 'bedrooms','stories']]  # Filtra apenas as colunas necessárias
+    # Garantir que todas as colunas categóricas sejam do tipo "object" ou "string"
     return df
 
 # Definição da arquitetura da rede neural para previsão de preços de imóveis
@@ -17,28 +19,48 @@ def carregar_dataset(caminho):
 # - Utiliza ReLU como função de ativação
 class HousePricePredictor(nn.Module):
     def __init__(self, input_size):
-        super(HousePricePredictor, self).__init__()  # Inicializa a classe base
-        self.layer1 = nn.Linear(input_size, 64)      # Primeira camada: entrada -> 64 neurônios
-        self.layer2 = nn.Linear(64, 32)              # Segunda camada: 64 -> 32 neurônios
-        self.layer3 = nn.Linear(32, 1)               # Camada de saída: 32 -> 1 neurônio (preço)
-        self.relu = nn.ReLU()                        # Função de ativação ReLU
-        
-    # Método que define o fluxo de dados através da rede
+        super(HousePricePredictor, self).__init__()
+        self.layer1 = nn.Linear(input_size, 128)
+        self.layer2 = nn.Linear(128, 64)
+        self.layer3 = nn.Linear(64, 32)
+        self.layer4 = nn.Linear(32, 1)
+        self.relu = nn.LeakyReLU()
+    
     def forward(self, x):
-        x = self.relu(self.layer1(x))  # Aplica primeira camada + ativação ReLU
-        x = self.relu(self.layer2(x))  # Aplica segunda camada + ativação ReLU
-        x = self.layer3(x)             # Aplica camada de saída (sem ativação)
+        x = self.relu(self.layer1(x))
+        x = self.relu(self.layer2(x))
+        x = self.relu(self.layer3(x))
+        x = self.layer4(x)
         return x
 
 # Função principal que organiza todo o fluxo de execução
 def main():
     # Carregamento e preparação dos dados
     df = carregar_dataset('Housing.csv')  # Carrega o dataset de preços de imóveis
-    print("Shape de X:", df[['area', 'bedrooms', 'stories']].values.shape)  # Exibe dimensões dos dados para debug
+    
+    # Identificar colunas numéricas e categóricas
+    colunas_categoricas = df.select_dtypes(include=['object', 'category']).columns.tolist()
+    colunas_numericas = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
+    colunas_numericas = [col for col in colunas_numericas if col != 'price']
+    
+    # Converter colunas categóricas para numéricas (0/1)
+    for col in colunas_categoricas:
+        # Verificar se é uma coluna binária (yes/no)
+        if set(df[col].unique()) == {'yes', 'no'} or set(df[col].unique()) == {'no', 'yes'}:
+            df[col] = df[col].map({'yes': 1, 'no': 0})
+        else:
+            # Para colunas não binárias, criar variáveis dummy (one-hot encoding)
+            dummies = pd.get_dummies(df[col], prefix=col, drop_first=True)
+            df = pd.concat([df, dummies], axis=1)
+            df.drop(col, axis=1, inplace=True)
+    
+    # Atualizar lista de colunas numéricas após a conversão
+    colunas_features = df.columns.tolist()
+    colunas_features.remove('price')
     
     # Separação dos dados em features (X) e target (y)
-    X = df[['area', 'bedrooms', 'stories']].values  # Features: área, quartos e andares
-    y = df['price'].values.reshape(-1, 1)           # Target: preço (reshape para formato de coluna)
+    X = df[colunas_features].values  # Todas as features (agora numéricas)
+    y = df['price'].values.reshape(-1, 1)  # Target: preço
     
     # Normalização dos dados para melhorar a convergência do modelo
     scaler_X = StandardScaler()  # Inicializa o scaler para as features
@@ -50,8 +72,11 @@ def main():
     X_tensor = torch.FloatTensor(X_normalized)  # Converte features para tensor
     y_tensor = torch.FloatTensor(y_normalized)  # Converte preços para tensor
     
+    # Obter o número final de features após one-hot encoding
+    input_size = X.shape[1]
+    
     # Inicialização e configuração do modelo
-    model = HousePricePredictor(input_size=3)  # Cria modelo com 3 features de entrada
+    model = HousePricePredictor(input_size=input_size)  # Cria modelo com o número correto de features
     criterion = nn.MSELoss()  # Define função de perda como Erro Quadrático Médio (MSE)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01)  # Define otimizador Adam com taxa de aprendizagem 0.01
     
@@ -71,8 +96,29 @@ def main():
         if (epoch + 1) % 20 == 0:
             print(f'Epoch [{epoch+1}/{epochs}], Loss: {loss.item():.4f}')
     
-    # Teste do modelo em um novo exemplo
-    teste = np.array([[7420, 4, 20]])  # Exemplo: imóvel com 7420 pés², 4 quartos, 20 anos
+    # Criar exemplo de teste
+    teste_dict = {}
+    teste_dict['area'] = 7420
+    teste_dict['bedrooms'] = 4
+    teste_dict['bathrooms'] = 2
+    teste_dict['stories'] = 3
+    
+    # Preencher valores binários (0 ou 1)
+    for col in ['mainroad', 'guestroom', 'basement', 'hotwaterheating', 'airconditioning', 'parking', 'prefarea']:
+        if col in colunas_features:
+            teste_dict[col] = 1  # Assumindo 'yes' para todas como exemplo
+    
+    # Preencher valores para colunas one-hot encoded
+    if 'furnishingstatus' in colunas_categoricas:
+        for col in colunas_features:
+            if col.startswith('furnishingstatus_'):
+                teste_dict[col] = 1 if col == 'furnishingstatus_furnished' else 0
+    
+    # Criar array de teste com os valores correspondentes às features em X
+    teste = np.array([[teste_dict.get(col, 0) for col in colunas_features]])
+    print("Exemplo de teste:", teste)
+    
+    # Normaliza o exemplo de teste
     teste_normalized = scaler_X.transform(teste)  # Normaliza o exemplo de teste
     teste_tensor = torch.FloatTensor(teste_normalized)  # Converte para tensor
     
